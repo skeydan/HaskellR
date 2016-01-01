@@ -26,7 +26,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
 
-module Data.Vector.SEXP.Mutable
+module Data.Vector.SEXP.Mutable.Slice
   ( -- * Mutable vectors of 'SEXP' types
     MVector(..)
   , IOVector
