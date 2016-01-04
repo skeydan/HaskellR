@@ -25,6 +25,7 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE ViewPatterns #-}
 
 module Data.Vector.SEXP
   ( Vector(..)
@@ -35,7 +36,6 @@ module Data.Vector.SEXP
   , unsafeFromSEXP
   , Data.Vector.SEXP.toSEXP
   , unsafeToSEXP
-
   -- * Accessors
   -- ** Length information
   , length
@@ -242,15 +242,19 @@ module Data.Vector.SEXP
   , unsafeToStorable
   ) where
 
+import Control.Monad.R.Class
+import Control.Monad.R.Internal
 import Data.Vector.SEXP.Base
-import Data.Vector.SEXP.Mutable (MVector(..))
-import qualified Data.Vector.SEXP.Mutable as Mutable
-import Foreign.R ( SEXP )
+import Data.Vector.SEXP.Mutable (MVector)
+import qualified Data.Vector.SEXP.Mutable.Internal as Mutable
+import Foreign.R ( SEXP(..) )
 import qualified Foreign.R as R
 import Foreign.R.Type ( SEXPTYPE(Char) )
 
 import Control.Monad.Primitive ( PrimMonad, PrimState )
 import Control.Monad.ST (ST)
+import Data.Proxy (Proxy(..))
+import Data.Reflection (Reifies(..))
 import qualified Data.Vector.Generic as G
 import qualified Data.Vector.Fusion.Stream as Stream
 import qualified Data.Vector.Storable as Storable
@@ -264,6 +268,7 @@ import Data.Word ( Word8 )
 -- import Data.Int  ( Int32 )
 import Foreign ( Ptr, plusPtr, castPtr )
 import Foreign.C
+import Foreign.ForeignPtr (ForeignPtr, newForeignPtr, withForeignPtr)
 import Foreign.Storable
 import Foreign.Marshal.Array ( copyArray )
 import qualified GHC.Foreign as GHC
@@ -303,44 +308,62 @@ import qualified Prelude
 #define USE_RINTERNALS
 #include <Rinternals.h>
 
+newtype ForeignSEXP ty = ForeignSEXP (ForeignPtr ())
+
+foreignSEXP :: PrimMonad m => SEXP s ty -> m (ForeignSEXP ty)
+foreignSEXP sx@(SEXP ptr) =
+    unsafePrimToPrim $ do
+      R.preserveObject sx
+      newForeignPtr ptr (R.releaseObject sx)
+
+withForeignSEXP
+  :: MonadR m
+  => ForeignSEXP ty
+  -> (forall s. SEXP s ty -> IO r)
+  -> m r
+withForeignSEXP (ForeignSEXP fptr) f =
+    io $ withForeignPtr fptr $ \ptr -> f (SEXP (castPtr ptr))
+
 -- | Immutable vectors. The second type paramater is a phantom parameter
 -- reflecting at the type level the tag of the vector when viewed as a 'SEXP'.
 -- The tag of the vector and the representation type are related via 'ElemRep'.
-newtype Vector s (ty :: SEXPTYPE) a = Vector { unVector :: SEXP s ty }
+data Vector s (ty :: SEXPTYPE) a = Vector
+  { vectorBase :: {-# UNPACK #-} !(ForeignSEXP ty)
+  , vectorOffset :: {-# UNPACK #-} !Int
+  , vectorLength :: {-# UNPACK #-} !Int
+  }
 
-type instance G.Mutable (Vector r ty) = MVector r ty
+type instance G.Mutable (W (Vector s ty a)) = Mutable.W (MVector s ty a)
 
-instance (Eq a, VECTOR s ty a) => Eq (Vector s ty a) where
+instance (Eq a, VECTOR s ty a) => Eq (Vector ty a) where
   a == b = toList a == toList b
 
-instance (Show a, VECTOR s ty a)  => Show (Vector s ty a) where
+instance (Show a, VECTOR s ty a)  => Show (Vector ty a) where
   show v = "fromList " Prelude.++ showList (toList v) ""
 
-instance (VECTOR s ty a)
-         => G.Vector (Vector s ty) a where
-  basicUnsafeFreeze (MVector s)  = return (Vector s)
-  basicUnsafeThaw   (Vector s)   = return (MVector s)
-  basicLength       (Vector s)   =
-      unsafeInlineIO $
-      fromIntegral <$> -- ({# get VECSEXP->vecsxp.length #} (R.unsexp s) :: IO Int32)
-        ((\ ptr -> do { peekByteOff ptr 32 :: IO CInt }) (R.unsexp s))
-  -- XXX Basic unsafe slice is O(N) complexity as it allocates a copy of
-  -- a vector, due to limitations of R's VECSXP structure, which we reuse
-  -- directly.
-  basicUnsafeSlice i l v         = unsafeInlineIO $ do
-    mv <- Mutable.new l
-    copyArray (toMVecPtr mv)
-              (toVecPtr v `plusPtr` i)
-              l
-    G.basicUnsafeFreeze mv
-  basicUnsafeIndexM v i          = return . unsafeInlineIO
-                                 $ peekElemOff (toVecPtr v) i
-  basicUnsafeCopy   mv v         = unsafePrimToPrim $
-    copyArray (toMVecPtr mv)
-              (toVecPtr v)
-              (G.basicLength v)
+-- | Internal wrapper type for reflection. First type parameter is the reified
+-- type to reflect.
+newtype W t ty a = W { unW :: Vector ty a }
 
-  elemseq _                      = seq
+instance (Reifies t (AcquireIO s), VECTOR s ty a) => G.Vector (W t ty) a where
+  basicUnsafeFreeze (Mutable.MVector sx off len) = do
+      fp <- foreignSEXP sx
+      return $ W $ Vector fp off len
+  basicUnsafeThaw (unW -> Vector fp off len) =
+      withForeignSEXP $ \sx -> do
+        sx' <- acquireIO sx
+        return $ Mutable.MVector (R.unsafeRelease sx') off len
+    where
+      AcquireIO acquireIO = reflect (Proxy :: Proxy t)
+  basicLength (unW -> Vector _ _ len) = len
+  basicUnsafeSlice i n (unW -> Vector fp off len) = W $ Vector fp (off + i) n
+  basicUnsafeIndexM v i = return . unsafeInlineIO $ peekElemOff (unsafeToPtr v) i
+  basicUnsafeCopy mv v =
+      unsafePrimToPrim $
+        copyArray (Mutable.unsafeToPtr mv)
+                  (unsafeToPtr v)
+                  (G.basicLength mv)
+  elemseq _ = seq
 
 #if __GLASGOW_HASKELL__ >= 708
 instance VECTOR s ty a => Exts.IsList (Vector s ty a) where
@@ -350,11 +373,8 @@ instance VECTOR s ty a => Exts.IsList (Vector s ty a) where
   toList = toList
 #endif
 
-toVecPtr :: Vector s ty a -> Ptr a
-toVecPtr mv = castPtr (R.unsafeSEXPToVectorPtr $ unVector mv)
-
-toMVecPtr :: MVector s ty r a -> Ptr a
-toMVecPtr mv = castPtr (R.unsafeSEXPToVectorPtr $ unMVector mv)
+unsafeToPtr :: Vector s ty a -> Ptr a
+unsafeToPtr v = castPtr (R.unsafeSEXPToVectorPtr $ vectorBase v)
 
 -- | /O(n)/ Create an immutable vector from a 'SEXP'. Because 'SEXP's are
 -- mutable, this function yields an immutable /copy/ of the 'SEXP'.
