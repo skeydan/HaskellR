@@ -26,18 +26,23 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE DeriveFunctor #-}
 
 module Data.Vector.SEXP
   ( Vector(..)
   , Mutable.MVector(..)
   , ElemRep
   , VECTOR
-  , Data.Vector.SEXP.fromSEXP
-  , unsafeFromSEXP
-  , Data.Vector.SEXP.toSEXP
-  , unsafeToSEXP
+  --, Data.Vector.SEXP.fromSEXP
+  --, unsafeFromSEXP
+  --, Data.Vector.SEXP.toSEXP
+  --, unsafeToSEXP
   -- * Accessors
   -- ** Length information
+  {-
   , length
   , null
   -- ** Indexing
@@ -228,24 +233,25 @@ module Data.Vector.SEXP
   , fromList
   , fromListN
   -- ** Mutable vectors
-  , freeze
-  , thaw
+  -- , freeze
+  -- , thaw
   , copy
   , unsafeFreeze
   , unsafeThaw
   , unsafeCopy
+  -}
 
-  -- ** SEXP specific
+  -- ** SEXP specific helpers.
   , toString
   , toByteString
-  , fromStorable
-  , unsafeToStorable
   ) where
 
 import Control.Monad.R.Class
 import Control.Monad.R.Internal
+import Control.Memory.Region
 import Data.Vector.SEXP.Base
 import Data.Vector.SEXP.Mutable (MVector)
+import qualified Data.Vector.SEXP.Mutable as Mutable
 import qualified Data.Vector.SEXP.Mutable.Internal as Mutable
 import Foreign.R ( SEXP(..) )
 import qualified Foreign.R as R
@@ -253,29 +259,33 @@ import Foreign.R.Type ( SEXPTYPE(Char) )
 
 import Control.Monad.Primitive ( PrimMonad, PrimState )
 import Control.Monad.ST (ST)
+import Data.Int
 import Data.Proxy (Proxy(..))
 import Data.Reflection (Reifies(..))
 import qualified Data.Vector.Generic as G
 import qualified Data.Vector.Fusion.Stream as Stream
 import qualified Data.Vector.Storable as Storable
 import Data.ByteString ( ByteString )
-import qualified Data.ByteString.Unsafe as B
+import qualified Data.ByteString as B
 
 import Control.Applicative ((<$>))
 import Control.Monad ( liftM )
 import Control.Monad.Primitive ( unsafeInlineIO, unsafePrimToPrim )
+import Data.Reflection
 import Data.Word ( Word8 )
 -- import Data.Int  ( Int32 )
 import Foreign ( Ptr, plusPtr, castPtr )
 import Foreign.C
-import Foreign.ForeignPtr (ForeignPtr, newForeignPtr, withForeignPtr)
+import Foreign.ForeignPtr (ForeignPtr, newForeignPtr, withForeignPtr, addForeignPtrFinalizer)
 import Foreign.Storable
 import Foreign.Marshal.Array ( copyArray )
 import qualified GHC.Foreign as GHC
+import qualified GHC.ForeignPtr as GHC
 import GHC.IO.Encoding.UTF8
 #if __GLASGOW_HASKELL__ >= 708
 import qualified GHC.Exts as Exts
 #endif
+import qualified Unsafe.Coerce
 
 import Prelude
   ( Eq(..)
@@ -303,66 +313,93 @@ import Prelude
   , uncurry
   )
 import qualified Prelude
+import qualified Control.Monad.ST as ST
+
+undefined = Prelude.undefined
 
 #include <R.h>
 #define USE_RINTERNALS
 #include <Rinternals.h>
 
-newtype ForeignSEXP ty = ForeignSEXP (ForeignPtr ())
+newtype ForeignSEXP (ty::SEXPTYPE) = ForeignSEXP (ForeignPtr ())
 
+-- | Create a 'ForeignSEXP' from 'SEXP'.
 foreignSEXP :: PrimMonad m => SEXP s ty -> m (ForeignSEXP ty)
 foreignSEXP sx@(SEXP ptr) =
     unsafePrimToPrim $ do
       R.preserveObject sx
-      newForeignPtr ptr (R.releaseObject sx)
+      ForeignSEXP <$> GHC.newConcForeignPtr (castPtr ptr) (R.releaseObject sx)
 
+-- | 'ForeignSEXP' deconstructor. Like with 'withForeignPtr' it's not safe to use
+-- 'SEXP s ty' outside of 'withForeinSEXP'.
 withForeignSEXP
   :: MonadR m
   => ForeignSEXP ty
-  -> (forall s. SEXP s ty -> IO r)
+  -> (forall s . SEXP s ty -> IO r)
   -> m r
 withForeignSEXP (ForeignSEXP fptr) f =
     io $ withForeignPtr fptr $ \ptr -> f (SEXP (castPtr ptr))
+
+withForeignSEXP1
+  ::  ForeignSEXP ty
+  -> (SEXP s ty -> IO r)
+  -> IO r
+withForeignSEXP1 (ForeignSEXP fptr) f =
+    withForeignPtr fptr $ \ptr -> f (SEXP (castPtr ptr))
 
 -- | Immutable vectors. The second type paramater is a phantom parameter
 -- reflecting at the type level the tag of the vector when viewed as a 'SEXP'.
 -- The tag of the vector and the representation type are related via 'ElemRep'.
 data Vector s (ty :: SEXPTYPE) a = Vector
-  { vectorBase :: {-# UNPACK #-} !(ForeignSEXP ty)
-  , vectorOffset :: {-# UNPACK #-} !Int
-  , vectorLength :: {-# UNPACK #-} !Int
+  { vectorBase   :: {-# UNPACK #-} !(ForeignSEXP ty)
+  , vectorOffset :: {-# UNPACK #-} !Int32
+  , vectorLength :: {-# UNPACK #-} !Int32
   }
 
-type instance G.Mutable (W (Vector s ty a)) = Mutable.W (MVector s ty a)
-
-instance (Eq a, VECTOR s ty a) => Eq (Vector ty a) where
+instance (Eq a, VECTOR s ty a) => Eq (Vector s ty a) where
   a == b = toList a == toList b
 
-instance (Show a, VECTOR s ty a)  => Show (Vector ty a) where
+instance (Show a, VECTOR s ty a)  => Show (Vector s ty a) where
   show v = "fromList " Prelude.++ showList (toList v) ""
 
 -- | Internal wrapper type for reflection. First type parameter is the reified
 -- type to reflect.
-newtype W t ty a = W { unW :: Vector ty a }
+newtype W t ty s a = W { unW :: Vector s ty a }
 
-instance (Reifies t (AcquireIO s), VECTOR s ty a) => G.Vector (W t ty) a where
-  basicUnsafeFreeze (Mutable.MVector sx off len) = do
+withW :: proxy t -> Vector s ty a -> W t ty s a
+withW _ v = W v
+
+proxyW :: p t -> (W t ty s a -> r) -> (Vector s ty a -> r)
+proxyW p f v = f (withW p v)
+
+type instance G.Mutable (W t ty s) = Mutable.W t ty
+
+instance (Reifies t (AcquireIO s), VECTOR s ty a) => G.Vector (W t ty s) a where
+  {-# INLINE basicUnsafeFreeze #-}
+  basicUnsafeFreeze (Mutable.unW -> Mutable.MVector sx off len) = do
       fp <- foreignSEXP sx
       return $ W $ Vector fp off len
-  basicUnsafeThaw (unW -> Vector fp off len) =
-      withForeignSEXP $ \sx -> do
-        sx' <- acquireIO sx
-        return $ Mutable.MVector (R.unsafeRelease sx') off len
+  {-# INLINE basicUnsafeThaw #-}
+  basicUnsafeThaw v@(unW -> Vector fp off len) = unsafePrimToPrim $
+      withForeignSEXP1 fp $ \ptr -> do
+         sx' <- acquireIO (R.release ptr)
+         return $ Mutable.withW p $ Mutable.MVector (R.unsafeRelease sx') off len
     where
       AcquireIO acquireIO = reflect (Proxy :: Proxy t)
-  basicLength (unW -> Vector _ _ len) = len
-  basicUnsafeSlice i n (unW -> Vector fp off len) = W $ Vector fp (off + i) n
-  basicUnsafeIndexM v i = return . unsafeInlineIO $ peekElemOff (unsafeToPtr v) i
+      p = Proxy :: Proxy t
+  basicLength (unW -> Vector _ _ len) = fromIntegral len
+  {-# INLINE basicUnsafeSlice #-}
+  basicUnsafeSlice (fromIntegral ->i) 
+     (fromIntegral ->n) (unW -> Vector fp off len) = W $ Vector fp (off + i) n
+  {-# INLINE basicUnsafeIndexM #-}
+  basicUnsafeIndexM v i = return . unsafeInlineIO $ peekElemOff (unsafeToPtr (unW v)) i
+  {-# INLINE basicUnsafeCopy #-}
   basicUnsafeCopy mv v =
       unsafePrimToPrim $
-        copyArray (Mutable.unsafeToPtr mv)
-                  (unsafeToPtr v)
-                  (G.basicLength mv)
+        copyArray (Mutable.unsafeToPtr (Mutable.unW mv))
+                  (unsafeToPtr (unW v))
+                  (G.basicLength v)
+  {-# INLINE elemseq #-}
   elemseq _ = seq
 
 #if __GLASGOW_HASKELL__ >= 708
@@ -373,16 +410,23 @@ instance VECTOR s ty a => Exts.IsList (Vector s ty a) where
   toList = toList
 #endif
 
+-- | Return Pointer of the first element of the vector storage.
 unsafeToPtr :: Vector s ty a -> Ptr a
-unsafeToPtr v = castPtr (R.unsafeSEXPToVectorPtr $ vectorBase v)
+{-# INLINE unsafeToPtr #-}
+unsafeToPtr v = unsafeInlineIO $ withForeignSEXP1 (vectorBase v) $ \p ->
+   return $  (R.unsafeSEXPToVectorPtr p `plusPtr` (fromIntegral $ vectorOffset v))
 
+{-
 -- | /O(n)/ Create an immutable vector from a 'SEXP'. Because 'SEXP's are
 -- mutable, this function yields an immutable /copy/ of the 'SEXP'.
 fromSEXP :: (VECTOR s ty a, PrimMonad m)
          => SEXP s ty
          -> m (Vector s ty a)
 fromSEXP s = G.freeze (Mutable.fromSEXP s)
+-}
 
+
+{-
 -- | /O(1)/ Unsafe convert a mutable 'SEXP' to an immutable vector without
 -- copying. The mutable vector must not be used after this operation, lest one
 -- runs the risk of breaking referential transparency.
@@ -390,31 +434,40 @@ unsafeFromSEXP :: VECTOR s ty a
                => SEXP s ty
                -> Vector s ty a
 unsafeFromSEXP s = Vector s
+-}
 
+{-
 -- | /O(n)/ Yield a (mutable) copy of the vector as a 'SEXP'.
 toSEXP :: (VECTOR s ty a, PrimMonad m)
        => Vector s ty a
        -> m (SEXP s ty)
 toSEXP = liftM Mutable.toSEXP . G.thaw
+-}
 
+{-
 -- | /O(1)/ Unsafely convert an immutable vector to a (mutable) 'SEXP' without
 -- copying. The immutable vector must not be used after this operation.
-unsafeToSEXP :: (VECTOR s ty a, PrimMonad m)
-             => Vector s ty a
-             -> m (SEXP s ty)
-unsafeToSEXP = liftM Mutable.toSEXP . G.unsafeThaw
+unsafeToSEXP :: (VECTOR (Region m) ty a, MonadR m)
+             => Vector (Region m) ty a
+             -> m (SEXP (Region m) ty)
+unsafeToSEXP v = withAcquire $ \p ->
+   Mutable.mvectorBase <$> G.unsafeThaw (withW p v)
+-}
 
 -- | /O(n)/ Convert a character vector into a 'String'.
 toString :: Vector s 'Char Word8 -> String
-toString v = unsafeInlineIO $ GHC.peekCString utf8 . castPtr
-         . R.unsafeSEXPToVectorPtr
-         . unVector $ v
+toString v = unsafeInlineIO $
+  GHC.peekCStringLen utf8 ( castPtr $ unsafeToPtr v
+                          , fromIntegral $ vectorLength v)
 
--- | /O(1)/ Convert a character vector into a strict 'ByteString'.
+
+-- | /O(n)/ Convert a character vector into a strict 'ByteString'.
 toByteString :: Vector s 'Char Word8 -> ByteString
-toByteString v@(Vector p) = unsafeInlineIO
-        $ B.unsafePackCStringLen (castPtr $! R.unsafeSEXPToVectorPtr p, G.length v)
+toByteString v = unsafeInlineIO $ 
+   B.packCStringLen ( castPtr $ unsafeToPtr v
+                    , fromIntegral $ vectorLength v)
 
+{-
 ------------------------------------------------------------------------
 -- Vector API
 --
@@ -757,7 +810,7 @@ generateM = G.generateM
 -- @
 -- create (do { v \<- new 2; write v 0 \'a\'; write v 1 \'b\'; return v }) = \<'a','b'\>
 -- @
-create :: VECTOR s ty a => (forall r. ST r (MVector s ty r a)) -> Vector s ty a
+create :: VECTOR s ty a => (forall r. ST r (MVector s ty a)) -> Vector s ty a
 {-# INLINE create #-}
 -- NOTE: eta-expanded due to http://hackage.haskell.org/trac/ghc/ticket/4120
 create p = G.create p
@@ -1467,29 +1520,30 @@ scanr1 = G.scanr1
 scanr1' :: VECTOR s ty a => (a -> a -> a) -> Vector s ty a -> Vector s ty a
 {-# INLINE scanr1' #-}
 scanr1' = G.scanr1'
-
+-}
 -- Conversions - Lists
 -- ------------------------
 
 -- | /O(n)/ Convert a vector to a list
 toList :: VECTOR s ty a => Vector s ty a -> [a]
 {-# INLINE toList #-}
-toList = G.toList
+toList v = withVector v $ \p -> return $ proxyW p G.toList v
 
 -- | /O(n)/ Convert a list to a vector
-fromList :: VECTOR s ty a => [a] -> Vector s ty a
+fromList :: VECTOR G ty a => [a] -> Vector G ty a
 {-# INLINE fromList #-}
-fromList xs = G.fromListN (Prelude.length xs) xs
+fromList xs = unW $ G.fromListN (Prelude.length xs) xs -- G.fromListN (Prelude.length xs) xs
 
 -- | /O(n)/ Convert the first @n@ elements of a list to a vector
 --
 -- @
 -- fromListN n xs = 'fromList' ('take' n xs)
 -- @
-fromListN :: VECTOR s ty a => Int -> [a] -> Vector s ty a
+fromListN :: (VECTOR s ty a, a ~ ElemRep s ty) => Int -> [a] -> Vector s ty a
 {-# INLINE fromListN #-}
-fromListN = G.fromListN
+fromListN i l = undefined -- unW (G.fromListN i l)
 
+{-
 -- Conversions - Unsafe casts
 -- --------------------------
 
@@ -1499,52 +1553,51 @@ fromListN = G.fromListN
 -- | /O(1)/ Unsafe convert a mutable vector to an immutable one with
 -- copying. The mutable vector may not be used after this operation.
 unsafeFreeze
-        :: (VECTOR s ty a, PrimMonad m) => MVector s ty (PrimState m) a -> m (Vector s ty a)
+        :: (VECTOR s ty a, PrimMonad m) => MVector s ty a -> m (Vector s ty a)
 {-# INLINE unsafeFreeze #-}
 unsafeFreeze = G.unsafeFreeze
 
 -- | /O(1)/ Unsafely convert an immutable vector to a mutable one with
 -- copying. The immutable vector may not be used after this operation.
-unsafeThaw
-        :: (VECTOR s ty a, PrimMonad m) => Vector s ty a -> m (MVector s ty (PrimState m) a)
+unsafeThaw :: (MonadR m, VECTOR s ty a, a ~ ElemRep (PrimState m) ty)
+           => Vector s ty a -> m (MVector s ty a)
 {-# INLINE unsafeThaw #-}
 unsafeThaw = G.unsafeThaw
 
+{-
 -- | /O(n)/ Yield a mutable copy of the immutable vector.
-thaw :: (VECTOR s ty a, PrimMonad m) => Vector s ty a -> m (MVector s ty (PrimState m) a)
+thaw :: (MonadR m, VECTOR (Region m) ty a)
+     => Vector (Region m) ty a -> m (MVector (Region m) ty a)
 {-# INLINE thaw #-}
-thaw = G.thaw
+thaw v1 = Mutable.unW <$> (withAcquire $ \p -> G.thaw (Mutable.withW p v1))
 
 -- | /O(n)/ Yield an immutable copy of the mutable vector.
-freeze :: (VECTOR s ty a, PrimMonad m) => MVector s ty (PrimState m) a -> m (Vector s ty a)
+freeze :: (MonadR m, VECTOR (Region m) ty a)
+       => MVector (Region m) ty a -> m (Vector (Region m) ty a)
 {-# INLINE freeze #-}
-freeze = G.freeze
+freeze m1 = unW <$> (withAcquire $ \p -> G.freeze (Mutable.withW p m1))
+-}
 
 -- | /O(n)/ Copy an immutable vector into a mutable one. The two vectors must
 -- have the same length. This is not checked.
 unsafeCopy
-  :: (VECTOR s ty a, PrimMonad m) => MVector s ty (PrimState m) a -> Vector s ty a -> m ()
+  :: (MonadR m, VECTOR (Region m) ty a)
+  => MVector (Region m) ty a -> Vector (Region m) ty a -> m ()
 {-# INLINE unsafeCopy #-}
-unsafeCopy = G.unsafeCopy
+unsafeCopy m1 v2 = withAcquire $ \p -> G.unsafeCopy (Mutable.withW p m1) (withW p v2)
 
 -- | /O(n)/ Copy an immutable vector into a mutable one. The two vectors must
 -- have the same length.
-copy :: (VECTOR s ty a, PrimMonad m) => MVector s ty (PrimState m) a -> Vector s ty a -> m ()
+copy :: (MonadR m, VECTOR (Region m) ty a)
+     => MVector (Region m) ty a -> Vector (Region m) ty a -> m ()
 {-# INLINE copy #-}
-copy = G.copy
+copy m1 v2 = withAcquire $ \p -> G.copy (Mutable.withW p m1) (withW p v2)
+-}
 
--- | O(1) Inplace convertion to Storable vector.
-unsafeToStorable :: VECTOR s ty a
-                 => Vector s ty a         -- ^ target
-                 -> Storable.Vector a     -- ^ source
-{-# INLINE unsafeToStorable #-}
-unsafeToStorable v = unsafeInlineIO $
-  G.unsafeFreeze =<< Mutable.unsafeToStorable =<< G.unsafeThaw v
-
--- | O(N) Convertion from storable vector to SEXP vector.
-fromStorable :: VECTOR s ty a
-             => Storable.Vector a
-             -> Vector s ty a
-{-# INLINE fromStorable #-}
-fromStorable v = unsafeInlineIO $
-  G.unsafeFreeze =<< Mutable.fromStorable =<< G.unsafeThaw v
+withVector :: Vector g ty a -> (forall s t . Reifies s (AcquireIO g) => Proxy s -> ST t r) -> r
+withVector _ f = ST.runST $ (reify (AcquireIO acquireIO) $ \p ->  f p)
+  where
+    acquireIO :: SEXP V ty -> IO (SEXP g ty)
+    acquireIO x = do
+      R.preserveObject x
+      return $ R.unsafeRelease x

@@ -119,6 +119,7 @@ module Foreign.R
   , unprotectPtr
   , preserveObject
   , releaseObject
+  , releaseObjectPtr
   , gc
     -- * Globals
   , isRInteractive
@@ -159,14 +160,13 @@ import Control.Applicative
 import Control.DeepSeq (NFData(..))
 import Control.Exception (bracket)
 import Control.Monad.Primitive ( unsafeInlineIO )
--- import Data.Bits
 import Data.Complex
 import Data.Int (Int32)
 import Data.Singletons (fromSing)
 #if __GLASGOW_HASKELL__ < 710
 import Data.Typeable (Typeable)
 #endif
-import Foreign (Ptr, castPtr, plusPtr, Storable(..))
+import Foreign (Ptr, castPtr, plusPtr, Storable(..),FunPtr)
 #ifdef H_ARCH_WINDOWS
 import Foreign (nullPtr)
 #endif
@@ -518,6 +518,9 @@ allocVectorProtected ty n = fmap release (protect =<< allocVector ty n)
 
 -- | Allow GC to remove an preserved object.
 {#fun R_ReleaseObject as releaseObject { unsexp `SEXP s a' } -> `()' #}
+
+-- | 'FunPtr' version of the 'realeaseObject' function.
+foreign import ccall "&R_ReleaseObject" releaseObjectPtr :: FunPtr (SEXP s a -> IO ())
 
 --------------------------------------------------------------------------------
 -- Evaluation                                                                 --
