@@ -105,7 +105,7 @@ phony
   => (forall t. Reifies t (AcquireIO s) => W t ty s a -> b)
   -> MVector s ty a
   -> b
-phony v f =
+phony f v =
     reify (AcquireIO acquireIO) $ \(Proxy :: Proxy t) -> do
       f (W v :: W t ty s a)
   where
@@ -114,12 +114,11 @@ phony v f =
 phony2
   :: forall s ty a b.
      (VECTOR s ty a)
-  =>
-  -> (forall t. Reifies t (AcquireIO s) => W t ty s a -> W t ty s a -> b)
+  => (forall t. Reifies t (AcquireIO s) => W t ty s a -> W t ty s a -> b)
   -> MVector s ty a
   -> MVector s ty a
   -> b
-phony2 v1 v2 f =
+phony2 f v1 v2 =
     reify (AcquireIO acquireIO) $ \(Proxy :: Proxy t) -> do
       f (W $ v1 :: W t ty s a)
         (W $ v2 :: W t ty s a)

@@ -12,6 +12,8 @@
 module Data.Vector.SEXP.Mutable.Internal
   ( MVector(..)
   , W(..)
+  , withW
+  , proxyW
   ) where
 
 import Control.Monad.Primitive (unsafePrimToPrim)
