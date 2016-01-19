@@ -58,7 +58,7 @@ instance (Reifies t (AcquireIO s), VECTOR s ty a) => G.MVector (W t ty) a where
 
   {-# INLINE basicUnsafeSlice #-}
   basicUnsafeSlice j m (unW -> MVector ptr off len) =
-      W $ MVector ptr (off + fromIntegral j) (len + fromIntegral m)
+      W $ MVector ptr (off + fromIntegral j) (fromIntegral m)
 
   {-# INLINE basicOverlaps #-}
   basicOverlaps (unW -> MVector ptr1 off1 len1) (unW -> MVector ptr2 off2 len2) =
