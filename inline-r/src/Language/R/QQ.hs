@@ -63,11 +63,14 @@ r = QuasiQuoter
 -- TODO some of the above invariants can be checked statically. Do so.
 rsafe :: QuasiQuoter
 rsafe = QuasiQuoter
-    { quoteExp  = \txt -> [| unsafePerformIO $ unsafeRToIO $ H.automaticSome =<< eval =<< $(expQQ txt) |]
+    { quoteExp  = \txt -> [| unsafePerformIO $ unsafeToIO $ inGlobal $ H.automaticSome =<< eval =<< $(expQQ txt) |]
     , quotePat  = unimplemented "quotePat"
     , quoteType = unimplemented "quoteType"
     , quoteDec  = unimplemented "quoteDec"
     }
+
+inGlobal :: R G s  -> R G s
+inGlobal = id
 
 -- | Serialize quasiquotes using a global lock, because the compiler is allowed
 -- in theory to run them in parallel, yet the R runtime is not reentrant.
