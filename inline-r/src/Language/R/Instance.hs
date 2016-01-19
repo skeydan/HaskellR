@@ -96,9 +96,10 @@ instance MonadR (R s) where
     x <- R.release <$> R.protect s
     modifyIORef' cnt succ
     return x
-  unsafeToIO m = do
-    ref <- newIORef 0
-    runReaderT (unR m) ref
+  unsafeToIO m =
+    bracket (newIORef 0)
+            (R.unprotect <=< readIORef)
+            (runReaderT (unR m))
 
 -- | Initialize a new instance of R, execute actions that interact with the
 -- R instance and then finalize the instance. This is typically called at the
