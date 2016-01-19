@@ -161,6 +161,7 @@ import Control.DeepSeq (NFData(..))
 import Control.Exception (bracket)
 import Control.Monad.Primitive ( unsafeInlineIO )
 import Data.Complex
+import Data.Bits
 import Data.Int (Int32)
 import Data.Singletons (fromSing)
 #if __GLASGOW_HASKELL__ < 710
