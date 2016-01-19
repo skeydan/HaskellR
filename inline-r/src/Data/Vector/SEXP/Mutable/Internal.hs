@@ -6,6 +6,7 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ViewPatterns #-}
 
@@ -15,7 +16,11 @@ module Data.Vector.SEXP.Mutable.Internal
   , withW
   , proxyW
   , unsafeToPtr
+  , release
   ) where
+
+import Control.Memory.Region
+import qualified Foreign.R as R
 
 import Control.Monad.Primitive (unsafePrimToPrim)
 import Control.Monad.R.Internal
@@ -99,3 +104,6 @@ proxyW m _ = fmap unW m
 
 withW :: proxy t -> MVector s ty a -> W t ty s a
 withW _ v = W v
+
+release :: (g <= s) => MVector s ty a -> MVector g ty a
+release (MVector b o l) = MVector (R.release b) o l
