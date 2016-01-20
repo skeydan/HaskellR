@@ -5,6 +5,7 @@
 -- a GHCi session.
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE TypeFamilies #-}
 module H.Prelude.Interactive
   ( module H.Prelude
   , p
@@ -16,8 +17,12 @@ import H.Prelude hiding (withEmbeddedR)
 import qualified H.Prelude as H
 
 instance MonadR IO where
+  data MonadRHandle IO s = Glob
   io = id
   unsafeToIO = id
+  acquireIn _ = acquire
+  allocHandler = return Glob
+
 
 -- | A form of the 'print' function that is more convenient in an
 -- interactive session.

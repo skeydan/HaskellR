@@ -25,6 +25,9 @@ import Prelude
 -- 'IO', imported only in GHCi).
 class (Applicative m, MonadIO m, MonadCatch m, MonadMask m, PrimMonad m)
       => MonadR m where
+
+  data MonadRHandle m  :: * -> *
+
   -- | Lift an 'IO' action.
   io :: IO a -> m a
   io = liftIO
@@ -40,6 +43,12 @@ class (Applicative m, MonadIO m, MonadCatch m, MonadMask m, PrimMonad m)
   -- their region. Acoquired resources are not freed automatically upon exit.
   -- For internal use only.
   unsafeToIO :: m a -> IO a
+
+  -- | Allocate inside given resource inside 'IO' context. Or another resource.
+  acquireIn :: MonadRHandle m (Region m) -> SEXP V a -> IO (SEXP (Region m) a)
+
+  -- | Allocate monad handle. See 'acquireIn'
+  allocHandler :: m (MonadRHandle m (Region m))
 
 type Region m = PrimState m
 

@@ -36,6 +36,7 @@ module Language.R.Instance
   , finalize
   ) where
 
+import           Control.Memory.Region
 import           Control.Monad.Primitive (PrimMonad(..))
 import           Control.Monad.R.Class
 import           Control.Monad.ST.Unsafe (unsafeSTToIO)
@@ -91,15 +92,23 @@ instance PrimMonad (R s) where
   primitive f = R $ lift $ unsafeSTToIO $ primitive f
 
 instance MonadR (R s) where
+  data MonadRHandle (R s) g = RHandle (IORef Int)
   io m = R $ ReaderT $ \_ -> m
-  acquire s = R $ ReaderT $ \cnt -> uninterruptibleMask_ $ do
-    x <- R.release <$> R.protect s
-    modifyIORef' cnt succ
-    return x
+  acquire s = R $ ReaderT $ acquireInternal s
   unsafeToIO m =
     bracket (newIORef 0)
             (R.unprotect <=< readIORef)
             (runReaderT (unR m))
+  allocHandler = R $ ReaderT $ \g -> return (RHandle g)
+  acquireIn (RHandle g) s = acquireInternal s g
+
+acquireInternal :: R.SEXP V a -> IORef Int -> IO (R.SEXP t a)
+acquireInternal s cnt =  uninterruptibleMask_ $ do
+    x <- R.release <$> R.protect s
+    modifyIORef' cnt succ
+    return x
+
+
 
 -- | Initialize a new instance of R, execute actions that interact with the
 -- R instance and then finalize the instance. This is typically called at the
