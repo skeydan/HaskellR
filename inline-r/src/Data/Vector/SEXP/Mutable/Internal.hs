@@ -32,7 +32,7 @@ import Data.Singletons (fromSing, sing)
 import qualified Data.Vector.Generic.Mutable as G
 import Data.Vector.SEXP.Base
 import Foreign (castPtr, Ptr)
-import Foreign.Marshal.Array (copyArray, moveArray)
+import Foreign.Marshal.Array (copyArray, moveArray, advancePtr)
 import Foreign.R (SEXP)
 import Foreign.R.Type (SSEXPTYPE)
 import Foreign.Storable
@@ -96,8 +96,9 @@ instance (Reifies t (AcquireIO s), VECTOR s ty a) => G.MVector (W t ty) a where
                 (unsafeToPtr mv2)
                 (G.basicLength w1)
 
-unsafeToPtr :: MVector s ty a -> Ptr a
-unsafeToPtr v = castPtr (R.unsafeSEXPToVectorPtr $ mvectorBase v)
+unsafeToPtr :: Storable a => MVector s ty a -> Ptr a
+unsafeToPtr v = castPtr (R.unsafeSEXPToVectorPtr (mvectorBase v))
+  `advancePtr` (fromIntegral (mvectorOffset v))
 
 proxyW :: Monad m => m (W t ty s a) -> proxy t -> m (MVector s ty a)
 proxyW m _ = fmap unW m

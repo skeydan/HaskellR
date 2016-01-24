@@ -30,6 +30,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE CPP #-}
 
 module Data.Vector.SEXP
   ( Vector(..)
@@ -174,7 +175,7 @@ module Data.Vector.SEXP
   , find
   , findIndex
   --, findIndices
-  , elemIndex 
+  , elemIndex
   --, elemIndices
 
   -- * Folding
@@ -255,6 +256,7 @@ module Data.Vector.SEXP
   , toByteString
   ) where
 
+import Control.Exception (evaluate)
 import Control.Monad.R.Class
 import Control.Monad.R.Internal
 import Control.Memory.Region
@@ -271,18 +273,28 @@ import Control.Monad.ST (runST)
 import Data.Int
 import Data.Proxy (Proxy(..))
 import Data.Reflection (Reifies(..), reify)
-import qualified Data.Vector.Generic as G
 import Data.Vector.Generic.New (run)
-import qualified Data.Vector.Fusion.Stream as Stream
 import Data.ByteString ( ByteString )
 import qualified Data.ByteString as B
+#if MIN_VERSION_vector(0,11,0)
+import qualified Data.Vector.Fusion.Bundle.Monadic as Bundle
+import           Data.Vector.Fusion.Bundle.Monadic (sSize, sElems)
+import           Data.Vector.Fusion.Bundle.Size (Size, smaller)
+import qualified Data.Vector.Fusion.Stream.Monadic as Stream
+#else
+import qualified Data.Vector.Fusion.Stream as Stream
+#endif
+import qualified Data.Vector.Generic as G
 
+
+import qualified Data.List as List
 import Control.Applicative ((<$>))
 import Control.Monad.Primitive ( unsafeInlineIO, unsafePrimToPrim )
 import Data.Word ( Word8 )
-import Foreign ( Ptr, plusPtr, castPtr, peekElemOff )
+import Foreign ( Ptr, castPtr, peekElemOff )
+import Foreign.Storable (Storable)
 import Foreign.ForeignPtr (ForeignPtr, withForeignPtr)
-import Foreign.Marshal.Array ( copyArray )
+import Foreign.Marshal.Array ( copyArray, advancePtr )
 import qualified GHC.Foreign as GHC
 import qualified GHC.ForeignPtr as GHC
 import GHC.IO.Encoding.UTF8
@@ -310,10 +322,6 @@ import Prelude
   , uncurry
   )
 import qualified Prelude
-
-#include <R.h>
-#define USE_RINTERNALS
-#include <Rinternals.h>
 
 newtype ForeignSEXP (ty::SEXPTYPE) = ForeignSEXP (ForeignPtr ())
 
@@ -413,15 +421,15 @@ instance VECTOR s ty a => Exts.IsList (Vector s ty a) where
 #endif
 
 -- | Return Pointer of the first element of the vector storage.
-unsafeToPtr :: Vector s ty a -> Ptr a
+unsafeToPtr :: Storable a => Vector s ty a -> Ptr a
 {-# INLINE unsafeToPtr #-}
 unsafeToPtr v = unsafeInlineIO $ withForeignSEXP1 (vectorBase v) $ \p ->
-   return $  (R.unsafeSEXPToVectorPtr p `plusPtr` (fromIntegral $ vectorOffset v))
+   evaluate (castPtr (R.unsafeSEXPToVectorPtr p) `advancePtr` fromIntegral (vectorOffset v))
 
 -- | /O(n)/ Create an immutable vector from a 'SEXP'. Because 'SEXP's are
 -- mutable, this function yields an immutable /copy/ of the 'SEXP'.
 fromSEXP :: (VECTOR s ty a) => SEXP s ty -> Vector s ty a
-fromSEXP s = phony $ \p -> runST $ do w <- run (proxyFW G.clone (unsafeFromSEXP s) p) 
+fromSEXP s = phony $ \p -> runST $ do w <- run (proxyFW G.clone (unsafeFromSEXP s) p)
                                       v <- G.unsafeFreeze w
                                       return (unW v)
 
@@ -457,7 +465,7 @@ toString v = unsafeInlineIO $
 
 -- | /O(n)/ Convert a character vector into a strict 'ByteString'.
 toByteString :: Vector s 'Char Word8 -> ByteString
-toByteString v = unsafeInlineIO $ 
+toByteString v = unsafeInlineIO $
    B.packCStringLen ( castPtr $ unsafeToPtr v
                     , fromIntegral $ vectorLength v)
 
@@ -775,7 +783,7 @@ infixr 5 ++
 -- | /O(m+n)/ Concatenate two vectors
 (++) :: VECTOR s ty a => Vector s ty a -> Vector s ty a -> Vector s ty a
 {-# INLINE (++) #-}
-v1 ++ v2 = phony $ unW . proxyFW2 (G.++) v1 v2 
+v1 ++ v2 = phony $ unW . proxyFW2 (G.++) v1 v2
 
 -- | /O(n)/ Concatenate all vectors in the list
 concat :: VECTOR s ty a => [Vector s ty a] -> Vector s ty a
