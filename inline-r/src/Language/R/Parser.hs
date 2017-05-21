@@ -3,10 +3,9 @@
 -- Stability:   Experimental
 -- Portability: Portable
 --
--- "Parser" module provides high-level interface that allows to parse
--- SEXP values into the complex Haskell data types.
--- This parser may be useful for application specific solutions
--- that need to convert different R types to the application specific ADT.
+-- The "Parser" module provides an interface to deconstruct SEXP values and
+-- to compose destructors, where cascades of cases would be necessary
+-- otherwise.
 --
 -- In addition this is the the simplest way to get additional attributes
 -- that exists in the structure.
@@ -30,6 +29,7 @@ module Language.R.Parser
   , null
   , s4
   , s3
+  , guardType
     -- * Queries
   , typeOf
   , getS3Class
@@ -37,11 +37,16 @@ module Language.R.Parser
     -- $attributes
   , someAttribute
   , attribute
+  , attributes
+  , lookupAttribute
     -- * Attribute parsers.
   , names
   , dim
   , dimnames
   , rownames
+    -- * Predefined parsers
+    -- $parsers
+  , factor
     -- * Helpers
   , charList
   , choice
@@ -53,20 +58,17 @@ import qualified Foreign.R as R
 
 import           Control.DeepSeq
 import           Control.Applicative
-import           Control.Monad
-import           Control.Monad.Trans.Reader
-import           Control.Monad.Trans.Except
-import           Control.Monad (unless, guard)
-import           Control.Exception (Exception, evaluate, throwIO)
+import           Control.Monad (guard, ap, liftM)
+import           Control.Exception (evaluate)
 import           Foreign hiding (void, with)
 import           Foreign.C.String
 import           H.Prelude hiding (typeOf, hexp)
 import qualified H.Prelude as H
 
 import           Data.Typeable (Typeable)
+import           Data.Functor (void)
 import           Data.Foldable (asum)
 import           Data.Traversable
-import           Data.Functor
 import           Data.Maybe (mapMaybe)
 import qualified Data.Vector.SEXP as SV
 import           System.IO.Unsafe
@@ -81,7 +83,26 @@ import Prelude hiding (null)
 -- This parser is a pure function, so if you need to allocate
 -- any object (for example for comparison or lookup) you should
 -- do it before running parser.
-newtype Parser s r a = Parser {runParser :: SomeSEXP s -> (a -> r) -> (ParserError s -> r) -> r}
+--
+-- Parameters meaning:
+--
+--   * @s@ - region that parsed expression belongs to
+--   * @r@ - value that will be returned as a result of parsing
+--
+newtype Parser s r a = Parser {
+  runParser :: SomeSEXP s  -- parsed expression
+            -> (a -> r)    -- continuation in case of success
+            -> (ParserError s -> r) -- continuation in case of failure
+            -> r
+  }
+
+-- Continuation monad is used in order to make parsing fast and
+-- and have an equal cost for left and right combinations.
+-- Different continuations for success and failure cases were chosen
+-- because otherwise we'd have to keep result in 'Either' that would
+-- lead to more boxing. Though I have to admit that benchmarks were
+-- not done, and this approach were chosen as initial one, as it's
+-- not much more complex then others.
 
 instance Monad (Parser s r) where
   return x = Parser $ \_ f _ -> f x
@@ -114,10 +135,10 @@ instance NFData (ParserError s)
 -- 
 -- Result is always forced to NF as otherwise it's not possible to
 -- guarantee that value with thunks will not escape protection region.
-parseOnly :: NFData a 
-          => Parser s (R s (Either (ParserError s) a)) a
+parseOnly :: (MonadR m, Region m ~ s, NFData a)
+          => Parser s (m (Either (ParserError s) a)) a
           -> SomeSEXP s
-          -> R s (Either (ParserError s) a)
+          -> m (Either (ParserError s) a)
 parseOnly p s = runParser p s (return . force . Right)
                               (return . force . Left)
 
@@ -201,7 +222,7 @@ guardType s = typeOf >>= guard . (s ==)
 
 
 -- | Returns any attribute by it's name if it exists.
--- Returns @NoSuchAttribute@ otherwise.
+-- Fails with @NoSuchAttribute@ otherwise.
 someAttribute :: String -> Parser s r (SomeSEXP s)
 someAttribute n = Parser $ \(SomeSEXP s) ok err ->
   let result = unsafePerformIO $ do
@@ -238,6 +259,10 @@ attributes p = do
               return $ mapMaybe (\(x,y) -> fmap (x,) y) $ zip ns ps
      , pure []
      ]
+
+-- | Find an attribute in attribute list if it exists.
+lookupAttribute :: String -> Parser s r (Maybe (SomeSEXP s))
+lookupAttribute s = (Just <$> someAttribute s) <|> pure Nothing
 
 -- | 'Language.R.Hexp.hexp' lifted to Parser, applies hexp to the current
 -- value and allow to run internal parser on it. Is useful when you need
@@ -296,7 +321,7 @@ rownames = do s <- attribute SString "row.names"
 choice :: [Parser r s a] -> Parser r s a
 choice = asum
 
--- | Parser that is applied to the R @List@ object and returns list
+-- | Parser that is applied to the R @List@ object and returns l
 -- of the results.
 list :: Int -- ^ Number of elements in a list.
      -> Parser s r (Maybe a) -- ^ Parser to apply to each element
@@ -309,3 +334,17 @@ list n p = choice
        return (v:vs)
   , pure []
   ]
+
+-- $parsers
+-- inline-r provides a set of the parsers that can be used in the libraries
+-- without reimplementation.
+
+-- | Parse a factor value. It takes a factor object as an input
+-- and returns a list of strings as an ouput
+factor :: Parser s r [String]
+factor = do
+  s3 ["factor"]
+  levels <- charList <$> attribute SString "levels"
+  hexp R.SInt $ \(Int v) ->
+    return $! (\i -> levels !! (fromIntegral i - 1)) <$> SV.toList v
+
