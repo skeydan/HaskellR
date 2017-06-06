@@ -76,23 +76,21 @@ import           GHC.Generics (Generic)
 
 import Prelude hiding (null)
 
--- | Parser. That run inspection over 'SomeSEXP'.
--- Parser is bound to the region where 'SomeSEXP' is allocated,
--- so extracted value will not leak out of the region scope.
+-- | @p :: Parser s r a@ inspects an 'SomeSEXP' expression.
+-- @p@ is bound to the region @s@ where 'SomeSEXP' is allocated,
+-- so the extracted value will not leak out of the region scope.
+--
+-- Running @p@ yields a result of type @r@, and in case of
+-- success a value of type @a@ is produced.
 --
 -- This parser is a pure function, so if you need to allocate
 -- any object (for example for comparison or lookup) you should
 -- do it before running parser.
 --
--- Parameters meaning:
---
---   * @s@ - region that parsed expression belongs to
---   * @r@ - value that will be returned as a result of parsing
---
 newtype Parser s r a = Parser {
-  runParser :: SomeSEXP s  -- parsed expression
-            -> (a -> r)    -- continuation in case of success
-            -> (ParserError s -> r) -- continuation in case of failure
+  runParser :: SomeSEXP s  -- ^ expression to parse
+            -> (a -> r)    -- ^ continuation in case of success
+            -> (ParserError s -> r) -- ^ continuation in case of failure
             -> r
   }
 
